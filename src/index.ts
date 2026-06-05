@@ -11,10 +11,11 @@ const PORT = process.env.PORT || 3001;
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 // Em produção, restrinja origins ao seu domínio Vercel
-app.use(cors({
-  origin: process.env.ALLOWED_ORIGIN ?? '*',
-  methods: ['GET'],
-}));
+// app.use(cors({
+//   origin: process.env.ALLOWED_ORIGIN ?? '*',
+//   methods: ['GET'],
+// }));
+app.use(cors());
 
 // ─── RATE LIMIT ───────────────────────────────────────────────────────────────
 app.use(rateLimit({
