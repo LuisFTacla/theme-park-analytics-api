@@ -101,7 +101,7 @@ export async function getDailyAverages(
   const query = `
     SELECT 
       DATE(timestamp_utc, '${timezone}') as data_local,
-      EXTRACT(YEAR  FROM DATETIME(timestamp_utc, '${timezone}')) as ano_registro,
+      EXTRACT(YEAR FROM DATETIME(timestamp_utc, '${timezone}')) as ano_registro,
       ROUND(AVG(wait_time), 0) as wait_time
     FROM \`${DATASET}\`
     WHERE park_id = ${parkId}
@@ -122,20 +122,23 @@ export async function getDailyAverages(
     const dateStr: string = typeof row.data_local === 'object'
       ? row.data_local.value
       : String(row.data_local);
-    const date = new Date(dateStr);
+    
+    // Forçamos o append de "T00:00:00Z" para garantir o parse isolado em UTC puro
+    const date = new Date(`${dateStr}T00:00:00Z`);
 
-    // week_of_year simples via ISO
-    const startOfYear = new Date(date.getFullYear(), 0, 1);
-    const weekOfYear = Math.ceil(((date.getTime() - startOfYear.getTime()) / 86400000 + startOfYear.getDay() + 1) / 7);
+    // week_of_year calculada de forma segura usando os milissegundos UTC
+    const startOfYear = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+    const weekOfYear = Math.ceil(((date.getTime() - startOfYear.getTime()) / 86400000 + startOfYear.getUTCDay() + 1) / 7);
 
     return {
       data_local: dateStr,
       ano_registro: Number(row.ano_registro),
       wait_time: Number(row.wait_time),
-      year:  date.getFullYear(),
-      month: date.getMonth() + 1,
-      day:   date.getDate(),
-      day_of_week: DAY_NAMES[date.getDay()],
+      // 🌟 LER SEMPRE OS MÉTODOS UTC PARA NÃO DEPENDER DO FUSO DO SERVIDOR
+      year:  date.getUTCFullYear(),
+      month: date.getUTCMonth() + 1,
+      day:   date.getUTCDate(),
+      day_of_week: DAY_NAMES[date.getUTCDay()],
       week_of_year: weekOfYear,
     };
   });
