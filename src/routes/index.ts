@@ -8,6 +8,7 @@ import {
   getDailyAverages,
   getDailyHeatmapData,
   getDailyEvolution,
+  getLiveFromBigQuery,
 } from '../services/bigquery.service';
 import { getLiveData } from '../services/live.service';
 
@@ -121,7 +122,7 @@ router.get('/parks/:parkId/live', async (req, res, next) => {
   const id = parseParkId(req, res);
   if (id === null) return;
   try {
-    const data = await getLiveData(id);
+    const data = await getLiveFromBigQuery(id);
     ok(res, data);
   } catch (err) {
     next(err);

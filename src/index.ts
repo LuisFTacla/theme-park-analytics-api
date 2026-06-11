@@ -1,5 +1,3 @@
-// src/index.ts
-
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
@@ -9,12 +7,10 @@ import routes from './routes';
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// ─── CONFIGURAÇÃO DE PROXY (Essencial para nuvem) ─────────────────────────────
+app.set('trust proxy', 1);
+
 // ─── CORS ─────────────────────────────────────────────────────────────────────
-// Em produção, restrinja origins ao seu domínio Vercel
-// app.use(cors({
-//   origin: process.env.ALLOWED_ORIGIN ?? '*',
-//   methods: ['GET'],
-// }));
 app.use(cors());
 
 // ─── RATE LIMIT ───────────────────────────────────────────────────────────────
