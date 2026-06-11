@@ -230,3 +230,47 @@ export async function getDailyEvolution(
   cache.set(cacheKey, result, isToday ? CACHE_TTL.EVOLUTION : CACHE_TTL.HEATMAP);
   return result;
 }
+
+// ─── DADOS AO VIVO (BIGQUERY) ──────────────────────────────────────────────────
+
+export async function getLiveFromBigQuery(parkId: number): Promise<any[]> {
+  const cacheKey = `live:bq:${parkId}`;
+  const cached = cache.get<any[]>(cacheKey);
+  if (cached) return cached;
+
+  // Query que descobre o último timestamp inserido para o parque
+  // e traz todas as atrações registradas exatamente nesse instante.
+  const query = `
+    WITH ultimo_registro AS (
+      SELECT MAX(timestamp_utc) as max_ts
+      FROM \`${DATASET}\`
+      WHERE park_id = ${parkId}
+    )
+    SELECT 
+      ride_id as id,
+      ${RIDE_NAME_EXPR} as name,
+      -- Se o seu job já salva o estado (aberto/fechado), ajuste o campo abaixo. 
+      -- Caso não salve, assumimos true se houver tempo de espera ou mapeie o campo correto.
+      IFNULL(is_open, true) as is_open, 
+      wait_time
+    FROM \`${DATASET}\`, ultimo_registro
+    WHERE park_id = ${parkId}
+      AND timestamp_utc = ultimo_registro.max_ts
+    ORDER BY name
+  `;
+
+  const [rows] = await bq.query({ query });
+  
+  // Como os dados já vêm tratados e filtrados pelo seu Job de coleta no BigQuery,
+  // basta tipar e estruturar o retorno esperado pela rota.
+  const result = rows.map(r => ({
+    id: Number(r.id),
+    name: String(r.name),
+    is_open: Boolean(r.is_open),
+    wait_time: Number(r.wait_time)
+  }));
+
+  // Salva no cache de curta duração (2 minutos)
+  cache.set(cacheKey, result, CACHE_TTL.EVOLUTION);
+  return result;
+}
