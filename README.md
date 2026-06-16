@@ -1,4 +1,3 @@
-[README-theme-park-analytics-api.md](https://github.com/user-attachments/files/29015341/README-theme-park-analytics-api.md)
 # 🎢 Theme Park Analytics — API
 
 <div align="center">
