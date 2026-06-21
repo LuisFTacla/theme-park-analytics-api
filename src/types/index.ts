@@ -42,6 +42,15 @@ export interface DailyEvolutionPoint {
   wait_time: number;
 }
 
+export interface HistoricalRawData {
+  timestamp_utc: string;
+  data_local: string;
+  ride_id: number;
+  name: string;
+  wait_time: number;
+  is_open?: boolean;
+}
+
 export interface ApiResponse<T> {
   data: T;
   cached?: boolean;

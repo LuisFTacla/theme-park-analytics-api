@@ -2,7 +2,7 @@
 
 import { BigQuery } from '@google-cloud/bigquery';
 import NodeCache from 'node-cache';
-import { HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint } from '../types';
+import { HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint, HistoricalRawData } from '../types';
 
 // Cache em memória: TTL em segundos
 const cache = new NodeCache();
@@ -272,5 +272,38 @@ export async function getLiveFromBigQuery(parkId: number): Promise<any[]> {
 
   // Salva no cache de curta duração (2 minutos)
   cache.set(cacheKey, result, CACHE_TTL.EVOLUTION);
+  return result;
+}
+
+// ─── DADOS HISTÓRICOS BRUTOS POR PARQUE ──────────────────────────────────────────
+
+export async function getRawHistoricalData(
+  parkId: number,
+  timezone: string
+): Promise<HistoricalRawData[]> {
+  const cacheKey = `raw:${parkId}:${timezone}`;
+  const cached = cache.get<HistoricalRawData[]>(cacheKey);
+  if (cached) return cached;
+
+  // Query trazendo as colunas essenciais ordenadas pela data/hora mais recente
+  const query = `
+    SELECT 
+      FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E3SZ', timestamp_utc) as timestamp_utc,
+      STRING(DATE(timestamp_utc, '${timezone}')) as data_local,
+      ride_id,
+      ${RIDE_NAME_EXPR} as name,
+      wait_time,
+      IFNULL(is_open, true) as is_open
+    FROM \`${DATASET}\`
+    WHERE park_id = ${parkId}
+    ORDER BY timestamp_utc DESC
+    LIMIT 50000
+  `;
+
+  const [rows] = await bq.query({ query });
+  const result = rows as HistoricalRawData[];
+
+  // Cache curto de 5 minutos (300 segundos) para poupar processamento repetido
+  cache.set(cacheKey, result, 300); 
   return result;
 }

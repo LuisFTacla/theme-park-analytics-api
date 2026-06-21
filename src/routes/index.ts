@@ -9,8 +9,8 @@ import {
   getDailyHeatmapData,
   getDailyEvolution,
   getLiveFromBigQuery,
+  getRawHistoricalData,
 } from '../services/bigquery.service';
-import { getLiveData } from '../services/live.service';
 
 const router = Router();
 
@@ -123,6 +123,20 @@ router.get('/parks/:parkId/live', async (req, res, next) => {
   if (id === null) return;
   try {
     const data = await getLiveFromBigQuery(id);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /parks/:parkId/raw ──────────────────────────────────────────────────
+router.get('/parks/:parkId/raw', async (req, res, next) => {
+  const id = parseParkId(req, res);
+  if (id === null) return;
+
+  try {
+    const tz = TZ_MAP[id] ?? 'UTC';
+    const data = await getRawHistoricalData(id, tz);
     ok(res, data);
   } catch (err) {
     next(err);
