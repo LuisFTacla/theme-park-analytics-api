@@ -134,9 +134,34 @@ router.get('/parks/:parkId/raw', async (req, res, next) => {
   const id = parseParkId(req, res);
   if (id === null) return;
 
+  // Captura os query parameters opcionais
+  const queryRideId = req.query.rideId as string;
+  const queryYear = req.query.year as string;
+
+  let rideId: number | undefined;
+  let year: number | undefined;
+
+  // Validação do rideId caso ele seja enviado
+  if (queryRideId) {
+    rideId = parseInt(queryRideId, 10);
+    if (isNaN(rideId)) {
+      res.status(400).json({ error: 'INVALID_PARAM', message: 'rideId deve ser um número inteiro.' });
+      return;
+    }
+  }
+
+  // Validação do year caso ele seja enviado
+  if (queryYear) {
+    year = parseInt(queryYear, 10);
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      res.status(400).json({ error: 'INVALID_PARAM', message: 'year deve ser um ano válido com 4 dígitos.' });
+      return;
+    }
+  }
+
   try {
     const tz = TZ_MAP[id] ?? 'UTC';
-    const data = await getRawHistoricalData(id, tz);
+    const data = await getRawHistoricalData(id, tz, rideId, year);
     ok(res, data);
   } catch (err) {
     next(err);

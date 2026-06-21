@@ -279,13 +279,23 @@ export async function getLiveFromBigQuery(parkId: number): Promise<any[]> {
 
 export async function getRawHistoricalData(
   parkId: number,
-  timezone: string
+  timezone: string,
+  rideId?: number,
+  year?: number
 ): Promise<HistoricalRawData[]> {
   const cacheKey = `raw:${parkId}:${timezone}`;
   const cached = cache.get<HistoricalRawData[]>(cacheKey);
   if (cached) return cached;
 
-  // Query trazendo as colunas essenciais ordenadas pela data/hora mais recente
+  // Construção dinâmica de filtros SQL
+  let filterConditions = '';
+  if (rideId) {
+    filterConditions += ` AND ride_id = ${rideId}`;
+  }
+  if (year) {
+    filterConditions += ` AND EXTRACT(YEAR FROM DATETIME(timestamp_utc, '${timezone}')) = ${year}`;
+  }
+
   const query = `
     SELECT 
       FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E3SZ', timestamp_utc) as timestamp_utc,
@@ -296,6 +306,7 @@ export async function getRawHistoricalData(
       IFNULL(is_open, true) as is_open
     FROM \`${DATASET}\`
     WHERE park_id = ${parkId}
+      ${filterConditions}
     ORDER BY timestamp_utc DESC
     LIMIT 50000
   `;
@@ -303,7 +314,7 @@ export async function getRawHistoricalData(
   const [rows] = await bq.query({ query });
   const result = rows as HistoricalRawData[];
 
-  // Cache curto de 5 minutos (300 segundos) para poupar processamento repetido
+  // Mantemos o cache de 5 minutos
   cache.set(cacheKey, result, 300); 
   return result;
 }
