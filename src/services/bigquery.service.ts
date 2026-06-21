@@ -283,7 +283,7 @@ export async function getRawHistoricalData(
   rideId?: number,
   year?: number
 ): Promise<HistoricalRawData[]> {
-  const cacheKey = `raw:${parkId}:${timezone}`;
+  const cacheKey = `raw:${parkId}:${rideId ?? 'all'}:${year ?? 'all'}`;
   const cached = cache.get<HistoricalRawData[]>(cacheKey);
   if (cached) return cached;
 
