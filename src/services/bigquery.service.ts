@@ -14,7 +14,7 @@ const CACHE_TTL = {
   EVOLUTION: 120,     // 2min — dados do dia atual mudam com frequência
 };
 
-const DATASET = 'theme-park-queue-data.theme_park_queues.historical_data';
+const DATASET = 'theme-park-queue-data.theme_park_queues.historical-data';
 
 // Inicializa o cliente BigQuery a partir de variável de ambiente (JSON em base64 ou path)
 function createBigQueryClient(): BigQuery {
