@@ -2,7 +2,7 @@
 
 import { BigQuery } from '@google-cloud/bigquery';
 import NodeCache from 'node-cache';
-import { HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint } from '../types';
+import { HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint, HistoricalRawData } from '../types';
 
 // Cache em memória: TTL em segundos
 const cache = new NodeCache();
@@ -272,5 +272,49 @@ export async function getLiveFromBigQuery(parkId: number): Promise<any[]> {
 
   // Salva no cache de curta duração (2 minutos)
   cache.set(cacheKey, result, CACHE_TTL.EVOLUTION);
+  return result;
+}
+
+// ─── DADOS HISTÓRICOS BRUTOS POR PARQUE ──────────────────────────────────────────
+
+export async function getRawHistoricalData(
+  parkId: number,
+  timezone: string,
+  rideId?: number,
+  year?: number
+): Promise<HistoricalRawData[]> {
+  const cacheKey = `raw:${parkId}:${rideId ?? 'all'}:${year ?? 'all'}`;
+  const cached = cache.get<HistoricalRawData[]>(cacheKey);
+  if (cached) return cached;
+
+  // Construção dinâmica de filtros SQL
+  let filterConditions = '';
+  if (rideId) {
+    filterConditions += ` AND ride_id = ${rideId}`;
+  }
+  if (year) {
+    filterConditions += ` AND EXTRACT(YEAR FROM DATETIME(timestamp_utc, '${timezone}')) = ${year}`;
+  }
+
+  const query = `
+    SELECT 
+      FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E3SZ', timestamp_utc) as timestamp_utc,
+      STRING(DATE(timestamp_utc, '${timezone}')) as data_local,
+      ride_id,
+      ${RIDE_NAME_EXPR} as name,
+      wait_time,
+      IFNULL(is_open, true) as is_open
+    FROM \`${DATASET}\`
+    WHERE park_id = ${parkId}
+      ${filterConditions}
+    ORDER BY timestamp_utc DESC
+    LIMIT 50000
+  `;
+
+  const [rows] = await bq.query({ query });
+  const result = rows as HistoricalRawData[];
+
+  // Mantemos o cache de 5 minutos
+  cache.set(cacheKey, result, 300); 
   return result;
 }
