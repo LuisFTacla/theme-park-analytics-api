@@ -2,7 +2,10 @@
 
 import { BigQuery } from '@google-cloud/bigquery';
 import NodeCache from 'node-cache';
-import { HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint, HistoricalRawData } from '../types';
+import {
+  HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint,
+  HistoricalRawData, DailyRideAverage, ForecastResponse, BacktestPoint,
+} from '../types';
 
 // Cache em memória: TTL em segundos
 const cache = new NodeCache();
@@ -12,9 +15,16 @@ const CACHE_TTL = {
   DAILY: 3600,        // 1h
   HEATMAP: 3600,      // 1h
   EVOLUTION: 120,     // 2min — dados do dia atual mudam com frequência
+  DAILY_BY_RIDE: 3600,   // 1h  — histórico recente por atração (input do forecast)
+  FORECAST: 6 * 3600,    // 6h  — previsão não precisa recalcular a cada request
+  BACKTEST: 24 * 3600,   // 24h — só muda quando gerar_backtest.py é rerodado (mensal)
 };
 
 const DATASET = 'theme-park-queue-data.theme_park_queues.historical-data';
+const BACKTEST_TABLE = 'theme-park-queue-data.theme_park_queues.backtest_previsoes';
+
+// Endpoint do microsserviço Python de previsão (forecast_service.py)
+const FORECAST_SERVICE_URL = process.env.FORECAST_SERVICE_URL ?? 'http://localhost:8000';
 
 // Inicializa o cliente BigQuery a partir de variável de ambiente (JSON em base64 ou path)
 function createBigQueryClient(): BigQuery {
@@ -316,5 +326,152 @@ export async function getRawHistoricalData(
 
   // Mantemos o cache de 5 minutos
   cache.set(cacheKey, result, 300); 
+  return result;
+}
+
+// ─── HISTÓRICO DIÁRIO POR ATRAÇÃO (input do modelo de forecast) ──────────────
+
+export async function getDailyAveragesByRide(
+  parkId: number,
+  timezone: string,
+  lookbackDays = 120
+): Promise<DailyRideAverage[]> {
+  const cacheKey = `daily_ride:${parkId}:${timezone}:${lookbackDays}`;
+  const cached = cache.get<DailyRideAverage[]>(cacheKey);
+  if (cached) return cached;
+
+  const query = `
+    SELECT
+      ${RIDE_NAME_EXPR} as name,
+      DATE(timestamp_utc, '${timezone}') as data_local,
+      AVG(wait_time) as avg_wait_time,
+      COUNT(*) as n_leituras
+    FROM \`${DATASET}\`
+    WHERE park_id = ${parkId}
+      AND wait_time > 0
+      AND DATE(timestamp_utc, '${timezone}') >= DATE_SUB(CURRENT_DATE('${timezone}'), INTERVAL ${lookbackDays} DAY)
+    GROUP BY name, data_local
+    HAVING n_leituras >= 20
+    ORDER BY data_local
+  `;
+
+  const [rows] = await bq.query({ query });
+  const result: DailyRideAverage[] = rows.map((r: any) => ({
+    name: String(r.name),
+    data_local: typeof r.data_local === 'object' ? r.data_local.value : String(r.data_local),
+    avg_wait_time: Number(r.avg_wait_time),
+  }));
+
+  cache.set(cacheKey, result, CACHE_TTL.DAILY_BY_RIDE);
+  return result;
+}
+
+// ─── PREVISÃO (chama o microsserviço Python) ──────────────────────────────────
+
+export async function getForecast(
+  parkId: number,
+  timezone: string,
+  days = 14
+): Promise<ForecastResponse> {
+  const cacheKey = `forecast:${parkId}:${timezone}:${days}`;
+  const cached = cache.get<ForecastResponse>(cacheKey);
+  if (cached) return cached;
+
+  const historico = await getDailyAveragesByRide(parkId, timezone);
+  if (!historico.length) {
+    throw new Error('Sem histórico suficiente para gerar previsão.');
+  }
+
+  const resp = await fetch(`${FORECAST_SERVICE_URL}/predict`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ historico, dias: days }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => '');
+    throw new Error(`Forecast service error (${resp.status}): ${errText}`);
+  }
+
+  const result = (await resp.json()) as ForecastResponse;
+  cache.set(cacheKey, result, CACHE_TTL.FORECAST);
+  return result;
+}
+
+// ─── PREVISÃO AGREGADA POR DIA (para mesclar no calendário) ──────────────────
+
+export async function getForecastCalendarDays(
+  parkId: number,
+  timezone: string,
+  days = 7
+): Promise<DailyAverage[]> {
+  const cacheKey = `forecast_calendar:${parkId}:${timezone}:${days}`;
+  const cached = cache.get<DailyAverage[]>(cacheKey);
+  if (cached) return cached;
+
+  const forecast = await getForecast(parkId, timezone, days);
+
+  const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+  // Agrega a previsão por atração em uma média diária do parque,
+  // na mesma métrica usada pelo calendário histórico (getDailyAverages)
+  const porDia = new Map<string, number[]>();
+  for (const p of forecast.previsoes) {
+    const arr = porDia.get(p.data_local) ?? [];
+    arr.push(p.pred_wait_time);
+    porDia.set(p.data_local, arr);
+  }
+
+  const result: DailyAverage[] = [...porDia.entries()].map(([dateStr, vals]) => {
+    const date = new Date(`${dateStr}T00:00:00Z`);
+    const media = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const startOfYear = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+    const weekOfYear = Math.ceil(
+      ((date.getTime() - startOfYear.getTime()) / 86400000 + startOfYear.getUTCDay() + 1) / 7
+    );
+
+    return {
+      data_local: dateStr,
+      ano_registro: date.getUTCFullYear(),
+      wait_time: Math.round(media),
+      year: date.getUTCFullYear(),
+      month: date.getUTCMonth() + 1,
+      day: date.getUTCDate(),
+      day_of_week: DAY_NAMES[date.getUTCDay()],
+      week_of_year: weekOfYear,
+      is_forecast: true,
+    };
+  });
+
+  cache.set(cacheKey, result, CACHE_TTL.FORECAST);
+  return result;
+}
+
+// ─── VALIDAÇÃO / BACKTEST (tabela estática, atualizada mensalmente) ──────────
+
+export async function getBacktestData(parkId: number): Promise<BacktestPoint[]> {
+  const cacheKey = `backtest:${parkId}`;
+  const cached = cache.get<BacktestPoint[]>(cacheKey);
+  if (cached) return cached;
+
+  // Nota: a tabela hoje cobre só o BCW (park_id 319) — se você expandir o
+  // backtest para outros parques, adicione uma coluna park_id na exportação
+  // do gerar_backtest.py e filtre aqui.
+  const query = `
+    SELECT data_local, name, wait_time_real, wait_time_previsto, mes_referencia, abs_erro
+    FROM \`${BACKTEST_TABLE}\`
+    ORDER BY data_local
+  `;
+  const [rows] = await bq.query({ query });
+  const result: BacktestPoint[] = rows.map((r: any) => ({
+    data_local: typeof r.data_local === 'object' ? r.data_local.value : String(r.data_local),
+    name: String(r.name),
+    wait_time_real: Number(r.wait_time_real),
+    wait_time_previsto: Number(r.wait_time_previsto),
+    mes_referencia: String(r.mes_referencia),
+    abs_erro: Number(r.abs_erro),
+  }));
+
+  cache.set(cacheKey, result, CACHE_TTL.BACKTEST);
   return result;
 }

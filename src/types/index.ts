@@ -20,6 +20,7 @@ export interface DailyAverage {
   day: number;
   day_of_week: string;
   week_of_year: number;
+  is_forecast?: boolean; // true quando o dia vem do modelo de previsão, não do histórico real
 }
 
 export interface HeatmapDataPoint {
@@ -49,6 +50,39 @@ export interface HistoricalRawData {
   name: string;
   wait_time: number;
   is_open?: boolean;
+}
+
+// ─── Previsão (forecast) ────────────────────────────────────────────────────
+
+// Histórico diário por atração — input do microsserviço de previsão
+export interface DailyRideAverage {
+  name: string;
+  data_local: string; // YYYY-MM-DD
+  avg_wait_time: number;
+}
+
+// Um ponto previsto, devolvido pelo microsserviço Python
+export interface ForecastPoint {
+  name: string;
+  data_local: string; // YYYY-MM-DD
+  pred_wait_time: number;
+}
+
+export interface ForecastResponse {
+  previsoes: ForecastPoint[];
+  horizonte_minimo_dias: number;
+  mae_esperado_val: number;
+}
+
+// ─── Validação / Backtest ───────────────────────────────────────────────────
+
+export interface BacktestPoint {
+  data_local: string; // YYYY-MM-DD
+  name: string;
+  wait_time_real: number;
+  wait_time_previsto: number;
+  mes_referencia: string; // YYYY-MM
+  abs_erro: number;
 }
 
 export interface ApiResponse<T> {

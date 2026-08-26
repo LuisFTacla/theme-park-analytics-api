@@ -1,7 +1,7 @@
 // src/routes/index.ts
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { TZ_MAP } from '../types';
+import { TZ_MAP, DailyAverage } from '../types';
 import {
   getAvailableParks,
   getHourlyAverages,
@@ -10,6 +10,9 @@ import {
   getDailyEvolution,
   getLiveFromBigQuery,
   getRawHistoricalData,
+  getForecast,
+  getForecastCalendarDays,
+  getBacktestData,
 } from '../services/bigquery.service';
 
 const router = Router();
@@ -59,13 +62,28 @@ router.get('/parks/:parkId/hourly', async (req, res, next) => {
 });
 
 // ─── GET /parks/:parkId/calendar ──────────────────────────────────────────────
+// Histórico real + (se disponível) os próximos dias previstos, mesclados no
+// mesmo array — o front-end diferencia visualmente via `is_forecast`.
 router.get('/parks/:parkId/calendar', async (req, res, next) => {
   const id = parseParkId(req, res);
   if (id === null) return;
   try {
     const tz = TZ_MAP[id] ?? 'UTC';
     const result = await getDailyAverages(id, tz);
-    ok(res, result);
+
+    // Previsão é "nice to have": se o microsserviço estiver fora do ar, o
+    // calendário histórico continua funcionando normalmente (fallback silencioso).
+    let forecastDays: DailyAverage[] = [];
+    try {
+      forecastDays = await getForecastCalendarDays(id, tz, 7);
+    } catch (e) {
+      console.warn('[Forecast] indisponível para o calendário:', (e as Error).message);
+    }
+
+    const mergedData = [...result.data, ...forecastDays];
+    const years = [...new Set(mergedData.map(d => d.year))].sort();
+
+    ok(res, { data: mergedData, years });
   } catch (err) {
     next(err);
   }
@@ -83,8 +101,8 @@ router.get('/parks/:parkId/heatmap', async (req, res, next) => {
     res.status(400).json({ error: 'INVALID_PARAM', message: 'Parâmetro date deve estar no formato YYYY-MM-DD.' });
     return;
   }
-  if (![15, 30, 60].includes(interval)) {
-    res.status(400).json({ error: 'INVALID_PARAM', message: 'interval deve ser 15, 30 ou 60.' });
+  if (![5, 10, 15, 30, 60].includes(interval)) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'interval deve ser 5, 10, 15, 30 ou 60.' });
     return;
   }
 
@@ -162,6 +180,42 @@ router.get('/parks/:parkId/raw', async (req, res, next) => {
   try {
     const tz = TZ_MAP[id] ?? 'UTC';
     const data = await getRawHistoricalData(id, tz, rideId, year);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /parks/:parkId/forecast?days=14 ──────────────────────────────────────
+// Previsão "crua", por atração/dia — usada por telas que precisam do detalhe
+// por atração (ex: ForecastChart). Para o calendário mesclado, veja /calendar acima.
+router.get('/parks/:parkId/forecast', async (req, res, next) => {
+  const id = parseParkId(req, res);
+  if (id === null) return;
+
+  const days = parseInt(req.query.days as string, 10) || 14;
+  if (days < 1 || days > 60) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'days deve estar entre 1 e 60.' });
+    return;
+  }
+
+  try {
+    const tz = TZ_MAP[id] ?? 'UTC';
+    const data = await getForecast(id, tz, days);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /parks/:parkId/backtest ──────────────────────────────────────────────
+// Validação do modelo: real vs previsto para os meses já fechados (gerado
+// via gerar_backtest.py e carregado manualmente no BigQuery, 1x por mês).
+router.get('/parks/:parkId/backtest', async (req, res, next) => {
+  const id = parseParkId(req, res);
+  if (id === null) return;
+  try {
+    const data = await getBacktestData(id);
     ok(res, data);
   } catch (err) {
     next(err);
