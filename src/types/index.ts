@@ -31,6 +31,32 @@ export interface HeatmapDataPoint {
   label_tempo?: string;
 }
 
+// ─── Estatísticas e heatmap de uma atração específica (modal de detalhe) ────
+
+export interface RideStats {
+  historicalAvg: number | null;
+  historicalMax: number | null;
+  dailyAvg: number | null;
+  dailyMax: number | null;
+}
+
+export interface RideHeatmapHistoryPoint {
+  data_local: string;
+  hora: number;
+  minuto_bloco: number;
+  wait_time_medio: number;
+  label_tempo: string;
+}
+
+// Perfil histórico contínuo (média por bloco de tempo, agregada entre todos os
+// dias) — usado pra desenhar a linha de média histórica no mesmo eixo do dia.
+export interface RideHistoricalProfilePoint {
+  hora: number;
+  minuto_bloco: number;
+  wait_time_medio: number;
+  label_tempo: string;
+}
+
 export interface LiveRide {
   id: number;
   name: string;

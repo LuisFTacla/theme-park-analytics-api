@@ -5,6 +5,7 @@ import NodeCache from 'node-cache';
 import {
   HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint,
   HistoricalRawData, DailyRideAverage, ForecastResponse, BacktestPoint,
+  RideStats, RideHeatmapHistoryPoint, RideHistoricalProfilePoint,
 } from '../types';
 
 // Cache em memória: TTL em segundos
@@ -18,6 +19,8 @@ const CACHE_TTL = {
   DAILY_BY_RIDE: 3600,   // 1h  — histórico recente por atração (input do forecast)
   FORECAST: 6 * 3600,    // 6h  — previsão não precisa recalcular a cada request
   BACKTEST: 24 * 3600,   // 24h — só muda quando gerar_backtest.py é rerodado (mensal)
+  RIDE_STATS: 3600,        // 1h  — média/máxima histórica e do dia, por atração
+  RIDE_HEATMAP_HISTORY: 3600, // 1h — heatmap de uma atração ao longo de vários dias
 };
 
 const DATASET = 'theme-park-queue-data.theme_park_queues.historical-data';
@@ -43,6 +46,40 @@ function createBigQueryClient(): BigQuery {
 }
 
 const bq = createBigQueryClient();
+
+// Teto de tempo de espera considerado válido — mesmo valor já usado no resto
+// do pipeline pra descartar erros de digitação de operadores (ex: 990 min).
+const MAX_VALID_WAIT_TIME = 300;
+
+// Consideramos que o "dia operacional" começa às 4h da manhã, não à meia-noite
+// — horário em que nenhum parque opera, nem durante Extra Magic Hours da
+// Disney. Sem isso, consultas por "DATE(timestamp_utc) = dia" cortam no meio
+// da operação de parques que fecham depois da meia-noite, e o horário extra
+// de hóspedes de hotel (que pertence à operação da noite ANTERIOR) vaza pro
+// dia seguinte. Precisa ficar em sincronia com OPERATING_DAY_CUTOFF_HOUR no
+// front (theme-park-analytics/src/utils/operatingHours.ts).
+const OPERATING_DAY_START_HOUR = 4;
+
+/**
+ * Helper de SQL: alterna entre buscar o "corpo" de um dia (a partir de
+ * `OPERATING_DAY_START_HOUR`) e a "cauda" que viraram a madrugada (antes de
+ * `OPERATING_DAY_START_HOUR`, mas já no dia seguinte no calendário) — depois
+ * ordena os dois trechos de forma contínua, cauda por último.
+ */
+function operatingDayWhereClause(timezone: string, date: string): string {
+  return `(
+    (DATE(timestamp_utc, '${timezone}') = '${date}'
+      AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, '${timezone}')) >= ${OPERATING_DAY_START_HOUR})
+    OR
+    (DATE(timestamp_utc, '${timezone}') = DATE_ADD(DATE('${date}'), INTERVAL 1 DAY)
+      AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, '${timezone}')) < ${OPERATING_DAY_START_HOUR})
+  )`;
+}
+
+/** Expressão de ordenação contínua (corpo do dia, depois a cauda da madrugada seguinte). */
+function operatingDayOrderBy(minuteColumn: string): string {
+  return `MOD(hora * 60 + ${minuteColumn} - ${OPERATING_DAY_START_HOUR} * 60 + 1440, 1440)`;
+}
 
 // Helper para montar a expressão de normalização de nomes
 const RIDE_NAME_EXPR = `
@@ -174,24 +211,23 @@ export async function getDailyHeatmapData(
   const bloco = intervalMinutes;
   const query = `
     WITH dados_indexados AS (
-      SELECT 
+      SELECT
         ${RIDE_NAME_EXPR} as name,
         wait_time,
         EXTRACT(HOUR   FROM DATETIME(timestamp_utc, '${timezone}')) as hora,
         EXTRACT(MINUTE FROM DATETIME(timestamp_utc, '${timezone}')) as minuto
       FROM \`${DATASET}\`
       WHERE park_id = ${parkId}
-        AND DATE(timestamp_utc, '${timezone}') = '${date}'
-        AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, '${timezone}')) BETWEEN 8 AND 22
+        AND ${operatingDayWhereClause(timezone, date)}
     )
-    SELECT 
+    SELECT
       name,
       hora,
       DIV(minuto, ${bloco}) * ${bloco} as minuto_bloco,
       ROUND(AVG(wait_time), 0) as wait_time_medio
     FROM dados_indexados
     GROUP BY name, hora, minuto_bloco
-    ORDER BY name, hora, minuto_bloco
+    ORDER BY name, ${operatingDayOrderBy('minuto_bloco')}
   `;
 
   const [rows] = await bq.query({ query });
@@ -207,6 +243,157 @@ export async function getDailyHeatmapData(
   return result;
 }
 
+// ─── ESTATÍSTICAS DE UMA ATRAÇÃO (modal de detalhe) ──────────────────────────
+// `rideName` vem de input do usuário (nome da atração, texto livre com acentos,
+// parênteses etc.) — por isso usamos parâmetros nomeados do BigQuery em vez de
+// interpolar a string na query, diferente do restante deste arquivo que só
+// interpola valores já validados como número/data por regex.
+
+export async function getRideStats(
+  parkId: number,
+  timezone: string,
+  rideName: string,
+  date: string
+): Promise<RideStats> {
+  const cacheKey = `ride_stats:${parkId}:${rideName}:${date}`;
+  const cached = cache.get<RideStats>(cacheKey);
+  if (cached) return cached;
+
+  const query = `
+    SELECT
+      ROUND(AVG(IF(wait_time > 0 AND wait_time <= @maxValid, wait_time, NULL)), 0) as historical_avg,
+      MAX(IF(wait_time <= @maxValid, wait_time, NULL)) as historical_max,
+      ROUND(AVG(IF(wait_time > 0 AND wait_time <= @maxValid AND DATE(timestamp_utc, @timezone) = @date, wait_time, NULL)), 0) as daily_avg,
+      MAX(IF(wait_time <= @maxValid AND DATE(timestamp_utc, @timezone) = @date, wait_time, NULL)) as daily_max
+    FROM \`${DATASET}\`
+    WHERE park_id = @parkId
+      AND (${RIDE_NAME_EXPR}) = @rideName
+  `;
+
+  const [rows] = await bq.query({
+    query,
+    params: { parkId, timezone, date, rideName, maxValid: MAX_VALID_WAIT_TIME },
+  });
+
+  const row = rows[0] ?? {};
+  const result: RideStats = {
+    historicalAvg: row.historical_avg != null ? Number(row.historical_avg) : null,
+    historicalMax: row.historical_max != null ? Number(row.historical_max) : null,
+    dailyAvg: row.daily_avg != null ? Number(row.daily_avg) : null,
+    dailyMax: row.daily_max != null ? Number(row.daily_max) : null,
+  };
+
+  const isToday = date === new Date().toISOString().split('T')[0];
+  cache.set(cacheKey, result, isToday ? CACHE_TTL.EVOLUTION : CACHE_TTL.RIDE_STATS);
+  return result;
+}
+
+// ─── HEATMAP DE UMA ATRAÇÃO AO LONGO DE VÁRIOS DIAS ──────────────────────────
+
+export async function getRideHeatmapHistory(
+  parkId: number,
+  timezone: string,
+  rideName: string,
+  days: number,
+  intervalMinutes: number
+): Promise<RideHeatmapHistoryPoint[]> {
+  const cacheKey = `ride_heatmap_history:${parkId}:${rideName}:${days}:${intervalMinutes}`;
+  const cached = cache.get<RideHeatmapHistoryPoint[]>(cacheKey);
+  if (cached) return cached;
+
+  const query = `
+    WITH dados_indexados AS (
+      SELECT
+        DATE(timestamp_utc, @timezone) as data_local,
+        wait_time,
+        EXTRACT(HOUR   FROM DATETIME(timestamp_utc, @timezone)) as hora,
+        EXTRACT(MINUTE FROM DATETIME(timestamp_utc, @timezone)) as minuto
+      FROM \`${DATASET}\`
+      WHERE park_id = @parkId
+        AND (${RIDE_NAME_EXPR}) = @rideName
+        AND DATE(timestamp_utc, @timezone) >= DATE_SUB(CURRENT_DATE(@timezone), INTERVAL @days DAY)
+        AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, @timezone)) BETWEEN 8 AND 22
+    )
+    SELECT
+      data_local,
+      hora,
+      DIV(minuto, @bloco) * @bloco as minuto_bloco,
+      ROUND(AVG(wait_time), 0) as wait_time_medio
+    FROM dados_indexados
+    GROUP BY data_local, hora, minuto_bloco
+    ORDER BY data_local, hora, minuto_bloco
+  `;
+
+  const [rows] = await bq.query({
+    query,
+    params: { parkId, timezone, rideName, days, bloco: intervalMinutes },
+  });
+
+  const result: RideHeatmapHistoryPoint[] = (rows as any[]).map(r => ({
+    data_local: typeof r.data_local === 'object' ? r.data_local.value : String(r.data_local),
+    hora: Number(r.hora),
+    minuto_bloco: Number(r.minuto_bloco),
+    wait_time_medio: Number(r.wait_time_medio),
+    label_tempo: String(r.hora).padStart(2, '0') + ':' + String(r.minuto_bloco).padStart(2, '0'),
+  }));
+
+  cache.set(cacheKey, result, CACHE_TTL.RIDE_HEATMAP_HISTORY);
+  return result;
+}
+
+// ─── PERFIL HISTÓRICO CONTÍNUO DE UMA ATRAÇÃO ────────────────────────────────
+// Média histórica por bloco de tempo (não por hora cheia) — usado pra desenhar
+// a linha de "média histórica" no mesmo eixo contínuo do gráfico do dia, em vez
+// de um degrau por hora.
+
+export async function getRideHistoricalProfile(
+  parkId: number,
+  timezone: string,
+  rideName: string,
+  intervalMinutes: number
+): Promise<RideHistoricalProfilePoint[]> {
+  const cacheKey = `ride_historical_profile:${parkId}:${rideName}:${intervalMinutes}`;
+  const cached = cache.get<RideHistoricalProfilePoint[]>(cacheKey);
+  if (cached) return cached;
+
+  const query = `
+    WITH dados_indexados AS (
+      SELECT
+        wait_time,
+        EXTRACT(HOUR   FROM DATETIME(timestamp_utc, @timezone)) as hora,
+        EXTRACT(MINUTE FROM DATETIME(timestamp_utc, @timezone)) as minuto
+      FROM \`${DATASET}\`
+      WHERE park_id = @parkId
+        AND (${RIDE_NAME_EXPR}) = @rideName
+        AND wait_time > 0
+        AND wait_time <= @maxValid
+        AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, @timezone)) BETWEEN 8 AND 22
+    )
+    SELECT
+      hora,
+      DIV(minuto, @bloco) * @bloco as minuto_bloco,
+      ROUND(AVG(wait_time), 0) as wait_time_medio
+    FROM dados_indexados
+    GROUP BY hora, minuto_bloco
+    ORDER BY hora, minuto_bloco
+  `;
+
+  const [rows] = await bq.query({
+    query,
+    params: { parkId, timezone, rideName, bloco: intervalMinutes, maxValid: MAX_VALID_WAIT_TIME },
+  });
+
+  const result: RideHistoricalProfilePoint[] = (rows as any[]).map(r => ({
+    hora: Number(r.hora),
+    minuto_bloco: Number(r.minuto_bloco),
+    wait_time_medio: Number(r.wait_time_medio),
+    label_tempo: String(r.hora).padStart(2, '0') + ':' + String(r.minuto_bloco).padStart(2, '0'),
+  }));
+
+  cache.set(cacheKey, result, CACHE_TTL.RIDE_STATS);
+  return result;
+}
+
 // ─── EVOLUÇÃO DIÁRIA (GRÁFICO DE LINHA) ───────────────────────────────────────
 
 export async function getDailyEvolution(
@@ -219,15 +406,15 @@ export async function getDailyEvolution(
   if (cached) return cached;
 
   const query = `
-    SELECT 
+    SELECT
       EXTRACT(HOUR   FROM DATETIME(timestamp_utc, '${timezone}')) as hora,
       EXTRACT(MINUTE FROM DATETIME(timestamp_utc, '${timezone}')) as minuto,
       AVG(wait_time) as wait_time
     FROM \`${DATASET}\`
     WHERE park_id = ${parkId}
-      AND DATE(timestamp_utc, '${timezone}') = '${date}'
+      AND ${operatingDayWhereClause(timezone, date)}
     GROUP BY hora, minuto
-    ORDER BY hora, minuto
+    ORDER BY ${operatingDayOrderBy('minuto')}
   `;
 
   const [rows] = await bq.query({ query });
@@ -238,6 +425,55 @@ export async function getDailyEvolution(
 
   const isToday = date === new Date().toISOString().split('T')[0];
   cache.set(cacheKey, result, isToday ? CACHE_TTL.EVOLUTION : CACHE_TTL.HEATMAP);
+  return result;
+}
+
+// ─── PERFIL HISTÓRICO CONTÍNUO DO PARQUE (todas as atrações) ─────────────────
+// Contraparte histórica de `getDailyEvolution` — mesma agregação (sem filtrar
+// wait_time > 0, pra ficar comparável com a evolução de um dia específico),
+// mas por bloco de tempo e com todos os dias agregados.
+export async function getParkHistoricalProfile(
+  parkId: number,
+  timezone: string,
+  intervalMinutes: number
+): Promise<RideHistoricalProfilePoint[]> {
+  const cacheKey = `park_historical_profile:${parkId}:${intervalMinutes}`;
+  const cached = cache.get<RideHistoricalProfilePoint[]>(cacheKey);
+  if (cached) return cached;
+
+  const query = `
+    WITH dados_indexados AS (
+      SELECT
+        wait_time,
+        EXTRACT(HOUR   FROM DATETIME(timestamp_utc, @timezone)) as hora,
+        EXTRACT(MINUTE FROM DATETIME(timestamp_utc, @timezone)) as minuto
+      FROM \`${DATASET}\`
+      WHERE park_id = @parkId
+        AND wait_time <= @maxValid
+        AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, @timezone)) BETWEEN 8 AND 22
+    )
+    SELECT
+      hora,
+      DIV(minuto, @bloco) * @bloco as minuto_bloco,
+      ROUND(AVG(wait_time), 0) as wait_time_medio
+    FROM dados_indexados
+    GROUP BY hora, minuto_bloco
+    ORDER BY hora, minuto_bloco
+  `;
+
+  const [rows] = await bq.query({
+    query,
+    params: { parkId, timezone, bloco: intervalMinutes, maxValid: MAX_VALID_WAIT_TIME },
+  });
+
+  const result: RideHistoricalProfilePoint[] = (rows as any[]).map(r => ({
+    hora: Number(r.hora),
+    minuto_bloco: Number(r.minuto_bloco),
+    wait_time_medio: Number(r.wait_time_medio),
+    label_tempo: String(r.hora).padStart(2, '0') + ':' + String(r.minuto_bloco).padStart(2, '0'),
+  }));
+
+  cache.set(cacheKey, result, CACHE_TTL.RIDE_STATS);
   return result;
 }
 

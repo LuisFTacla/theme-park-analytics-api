@@ -13,6 +13,10 @@ import {
   getForecast,
   getForecastCalendarDays,
   getBacktestData,
+  getRideStats,
+  getRideHeatmapHistory,
+  getRideHistoricalProfile,
+  getParkHistoricalProfile,
 } from '../services/bigquery.service';
 
 const router = Router();
@@ -109,6 +113,115 @@ router.get('/parks/:parkId/heatmap', async (req, res, next) => {
   try {
     const tz = TZ_MAP[id] ?? 'UTC';
     const data = await getDailyHeatmapData(id, tz, date, interval);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /parks/:parkId/rides/stats?name=&date=YYYY-MM-DD ────────────────────
+// Média/máxima histórica geral e do dia selecionado, para uma atração específica.
+router.get('/parks/:parkId/rides/stats', async (req, res, next) => {
+  const id = parseParkId(req, res);
+  if (id === null) return;
+
+  const rideName = req.query.name as string;
+  const date = req.query.date as string;
+
+  if (!rideName) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'Parâmetro name (nome da atração) é obrigatório.' });
+    return;
+  }
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'Parâmetro date deve estar no formato YYYY-MM-DD.' });
+    return;
+  }
+
+  try {
+    const tz = TZ_MAP[id] ?? 'UTC';
+    const data = await getRideStats(id, tz, rideName, date);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /parks/:parkId/rides/historical-profile?name=&interval=15 ───────────
+// Média histórica por bloco de tempo (todos os dias agregados) — usada pra
+// desenhar a linha de média histórica no mesmo eixo contínuo do gráfico do dia.
+router.get('/parks/:parkId/rides/historical-profile', async (req, res, next) => {
+  const id = parseParkId(req, res);
+  if (id === null) return;
+
+  const rideName = req.query.name as string;
+  const interval = parseInt(req.query.interval as string, 10) || 15;
+
+  if (!rideName) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'Parâmetro name (nome da atração) é obrigatório.' });
+    return;
+  }
+  if (![5, 10, 15, 30, 60].includes(interval)) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'interval deve ser 5, 10, 15, 30 ou 60.' });
+    return;
+  }
+
+  try {
+    const tz = TZ_MAP[id] ?? 'UTC';
+    const data = await getRideHistoricalProfile(id, tz, rideName, interval);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /parks/:parkId/rides/heatmap-history?name=&days=14&interval=30 ──────
+// Heatmap de uma atração específica ao longo dos últimos N dias.
+router.get('/parks/:parkId/rides/heatmap-history', async (req, res, next) => {
+  const id = parseParkId(req, res);
+  if (id === null) return;
+
+  const rideName = req.query.name as string;
+  const days = parseInt(req.query.days as string, 10) || 14;
+  const interval = parseInt(req.query.interval as string, 10) || 30;
+
+  if (!rideName) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'Parâmetro name (nome da atração) é obrigatório.' });
+    return;
+  }
+  if (days < 1 || days > 30) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'days deve estar entre 1 e 30.' });
+    return;
+  }
+  if (![5, 10, 15, 30, 60].includes(interval)) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'interval deve ser 5, 10, 15, 30 ou 60.' });
+    return;
+  }
+
+  try {
+    const tz = TZ_MAP[id] ?? 'UTC';
+    const data = await getRideHeatmapHistory(id, tz, rideName, days, interval);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /parks/:parkId/historical-profile?interval=15 ───────────────────────
+// Contraparte histórica de /evolution — média por bloco de tempo agregando
+// todos os dias, pra comparar com a evolução de um dia específico.
+router.get('/parks/:parkId/historical-profile', async (req, res, next) => {
+  const id = parseParkId(req, res);
+  if (id === null) return;
+
+  const interval = parseInt(req.query.interval as string, 10) || 15;
+  if (![5, 10, 15, 30, 60].includes(interval)) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'interval deve ser 5, 10, 15, 30 ou 60.' });
+    return;
+  }
+
+  try {
+    const tz = TZ_MAP[id] ?? 'UTC';
+    const data = await getParkHistoricalProfile(id, tz, interval);
     ok(res, data);
   } catch (err) {
     next(err);
