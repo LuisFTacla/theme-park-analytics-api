@@ -21,6 +21,7 @@ export interface DailyAverage {
   day_of_week: string;
   week_of_year: number;
   is_forecast?: boolean; // true quando o dia vem do modelo de previsão, não do histórico real
+  show_sessions?: number; // total de sessões de show nesse dia -- só existe a partir de 2026-09-24 (início da coleta)
 }
 
 export interface HeatmapDataPoint {
@@ -55,6 +56,15 @@ export interface RideHistoricalProfilePoint {
   minuto_bloco: number;
   wait_time_medio: number;
   label_tempo: string;
+}
+
+// ─── Horários de shows (só BCW, hoje) ────────────────────────────────────────
+
+export interface ShowSession {
+  atracao_id: number;
+  nome: string;
+  periodo_de: string;  // "HH:MM:SS"
+  periodo_ate: string; // "HH:MM:SS"
 }
 
 export interface LiveRide {

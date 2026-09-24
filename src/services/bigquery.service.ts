@@ -5,7 +5,7 @@ import NodeCache from 'node-cache';
 import {
   HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint,
   HistoricalRawData, DailyRideAverage, ForecastResponse, BacktestPoint,
-  RideStats, RideHeatmapHistoryPoint, RideHistoricalProfilePoint,
+  RideStats, RideHeatmapHistoryPoint, RideHistoricalProfilePoint, ShowSession,
 } from '../types';
 
 // Cache em memória: TTL em segundos
@@ -21,10 +21,12 @@ const CACHE_TTL = {
   BACKTEST: 24 * 3600,   // 24h — só muda quando gerar_backtest.py é rerodado (mensal)
   RIDE_STATS: 3600,        // 1h  — média/máxima histórica e do dia, por atração
   RIDE_HEATMAP_HISTORY: 3600, // 1h — heatmap de uma atração ao longo de vários dias
+  SHOWS: 1800,             // 30min — grade de shows só muda 2x/dia na coleta (10h/12h)
 };
 
 const DATASET = 'theme-park-queue-data.theme_park_queues.historical-data';
 const BACKTEST_TABLE = 'theme-park-queue-data.theme_park_queues.backtest_previsoes';
+const SHOWS_TABLE = 'theme-park-queue-data.theme_park_queues.bcw_shows_schedule';
 
 // Endpoint do microsserviço Python de previsão (forecast_service.py)
 const FORECAST_SERVICE_URL = process.env.FORECAST_SERVICE_URL ?? 'http://localhost:8000';
@@ -145,16 +147,35 @@ export async function getDailyAverages(
   const cached = cache.get<{ data: DailyAverage[]; years: number[] }>(cacheKey);
   if (cached) return cached;
 
+  // `sessoes` só tem linha pros dias em que a coleta de shows já rodou (a
+  // partir de 2026-09-24) -- pra dias mais antigos o LEFT JOIN devolve NULL,
+  // e o front simplesmente não mostra a contagem (ver CalendarGrid.tsx).
   const query = `
-    SELECT 
-      DATE(timestamp_utc, '${timezone}') as data_local,
-      EXTRACT(YEAR FROM DATETIME(timestamp_utc, '${timezone}')) as ano_registro,
-      ROUND(AVG(wait_time), 0) as wait_time
-    FROM \`${DATASET}\`
-    WHERE park_id = ${parkId}
-      AND wait_time > 0
-    GROUP BY data_local, ano_registro
-    ORDER BY data_local
+    WITH filas AS (
+      SELECT
+        DATE(timestamp_utc, '${timezone}') as data_local,
+        EXTRACT(YEAR FROM DATETIME(timestamp_utc, '${timezone}')) as ano_registro,
+        ROUND(AVG(wait_time), 0) as wait_time
+      FROM \`${DATASET}\`
+      WHERE park_id = ${parkId}
+        AND wait_time > 0
+      GROUP BY data_local, ano_registro
+    ),
+    sessoes AS (
+      -- Portal da Escuridão não é um show com sessões, é um labirinto que
+      -- fica simplesmente aberto/fechado -- não entra nessa contagem.
+      SELECT
+        data_local,
+        COUNT(DISTINCT CONCAT(CAST(atracao_id AS STRING), '|', periodo_de, '|', periodo_ate)) as show_sessions
+      FROM \`${SHOWS_TABLE}\`
+      WHERE park_id = ${parkId}
+        AND nome != 'Portal da Escuridão'
+      GROUP BY data_local
+    )
+    SELECT f.*, s.show_sessions
+    FROM filas f
+    LEFT JOIN sessoes s USING (data_local)
+    ORDER BY f.data_local
   `;
 
   const [rows] = await bq.query({ query });
@@ -187,6 +208,7 @@ export async function getDailyAverages(
       day:   date.getUTCDate(),
       day_of_week: DAY_NAMES[date.getUTCDay()],
       week_of_year: weekOfYear,
+      show_sessions: row.show_sessions != null ? Number(row.show_sessions) : undefined,
     };
   });
 
@@ -680,6 +702,39 @@ export async function getForecastCalendarDays(
   });
 
   cache.set(cacheKey, result, CACHE_TTL.FORECAST);
+  return result;
+}
+
+// ─── HORÁRIOS DE SHOWS (só BCW) ───────────────────────────────────────────────
+// A tabela é append-only (cada coleta das 10h/12h grava um snapshot) e o
+// próprio coletor já deduplica antes de gravar -- mas o SELECT DISTINCT aqui
+// é uma segurança barata a mais contra qualquer linha duplicada que já
+// existisse antes dessa dedução ter sido corrigida na coleta.
+
+export async function getShowsSchedule(
+  parkId: number,
+  date: string
+): Promise<ShowSession[]> {
+  const cacheKey = `shows:${parkId}:${date}`;
+  const cached = cache.get<ShowSession[]>(cacheKey);
+  if (cached) return cached;
+
+  const query = `
+    SELECT DISTINCT atracao_id, nome, periodo_de, periodo_ate
+    FROM \`${SHOWS_TABLE}\`
+    WHERE park_id = @parkId AND data_local = @date
+    ORDER BY periodo_de
+  `;
+
+  const [rows] = await bq.query({ query, params: { parkId, date } });
+  const result: ShowSession[] = rows.map((r: any) => ({
+    atracao_id: Number(r.atracao_id),
+    nome: String(r.nome),
+    periodo_de: String(r.periodo_de.value ?? r.periodo_de),
+    periodo_ate: String(r.periodo_ate.value ?? r.periodo_ate),
+  }));
+
+  cache.set(cacheKey, result, CACHE_TTL.SHOWS);
   return result;
 }
 

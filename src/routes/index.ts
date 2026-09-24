@@ -17,6 +17,7 @@ import {
   getRideHeatmapHistory,
   getRideHistoricalProfile,
   getParkHistoricalProfile,
+  getShowsSchedule,
 } from '../services/bigquery.service';
 
 const router = Router();
@@ -222,6 +223,27 @@ router.get('/parks/:parkId/historical-profile', async (req, res, next) => {
   try {
     const tz = TZ_MAP[id] ?? 'UTC';
     const data = await getParkHistoricalProfile(id, tz, interval);
+    ok(res, data);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /parks/:parkId/shows?date=YYYY-MM-DD ────────────────────────────────
+// Grade de horários de shows do dia (só existe pro BCW hoje — outros parques
+// simplesmente devolvem lista vazia, a query já filtra por park_id).
+router.get('/parks/:parkId/shows', async (req, res, next) => {
+  const id = parseParkId(req, res);
+  if (id === null) return;
+
+  const date = req.query.date as string;
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    res.status(400).json({ error: 'INVALID_PARAM', message: 'Parâmetro date deve estar no formato YYYY-MM-DD.' });
+    return;
+  }
+
+  try {
+    const data = await getShowsSchedule(id, date);
     ok(res, data);
   } catch (err) {
     next(err);
