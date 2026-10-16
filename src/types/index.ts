@@ -79,15 +79,6 @@ export interface DailyEvolutionPoint {
   wait_time: number;
 }
 
-export interface HistoricalRawData {
-  timestamp_utc: string;
-  data_local: string;
-  ride_id: number;
-  name: string;
-  wait_time: number;
-  is_open?: boolean;
-}
-
 // ─── Previsão (forecast) ────────────────────────────────────────────────────
 
 // Histórico diário por atração — input do microsserviço de previsão
@@ -132,6 +123,32 @@ export interface ApiError {
   message: string;
   statusCode: number;
 }
+
+// Parques coletados — espelha o PARK_CONFIG da Lambda (queue-collector/script.py).
+// Lista fixa em vez de SELECT DISTINCT na tabela, que lia ~1 GB a cada chamada.
+// Ao adicionar um parque na coleta, adicione aqui e no TZ_MAP também.
+export const PARKS: Park[] = [
+  { park_id: 8,   park_name: 'Animal Kingdom' },
+  { park_id: 319, park_name: 'Beto Carrero World' },
+  { park_id: 24,  park_name: 'Busch Gardens Tampa' },
+  { park_id: 17,  park_name: 'California Adventure' },
+  { park_id: 16,  park_name: 'Disneyland' },
+  { park_id: 4,   park_name: 'Disneyland Paris' },
+  { park_id: 5,   park_name: 'Epcot' },
+  { park_id: 334, park_name: 'Epic Universe' },
+  { park_id: 15,  park_name: 'Hersheypark' },
+  { park_id: 7,   park_name: 'Hollywood Studios' },
+  { park_id: 64,  park_name: 'Islands Of Adventure' },
+  { park_id: 61,  park_name: "Knott's Berry Farm" },
+  { park_id: 6,   park_name: 'Magic Kingdom' },
+  { park_id: 9,   park_name: 'Parc Asterix' },
+  { park_id: 21,  park_name: 'Seaworld Orlando' },
+  { park_id: 32,  park_name: 'Six Flags Magic Mountain' },
+  { park_id: 2,   park_name: 'Thorpe Park' },
+  { park_id: 66,  park_name: 'Universal Studios Hollywood' },
+  { park_id: 65,  park_name: 'Universal Studios Orlando' },
+  { park_id: 28,  park_name: 'Walt Disney Studios Paris' },
+];
 
 // Mapa de fusos horários por park_id
 export const TZ_MAP: Record<number, string> = {

@@ -4,15 +4,14 @@ import { BigQuery } from '@google-cloud/bigquery';
 import NodeCache from 'node-cache';
 import {
   HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint,
-  HistoricalRawData, DailyRideAverage, ForecastResponse, BacktestPoint,
+  DailyRideAverage, ForecastResponse, BacktestPoint,
   RideStats, RideHeatmapHistoryPoint, RideHistoricalProfilePoint, ShowSession,
 } from '../types';
 
 // Cache em memória: TTL em segundos
 const cache = new NodeCache();
 const CACHE_TTL = {
-  PARKS: 86400,       // 24h — lista de parques muda raramente
-  HOURLY: 3600,       // 1h  — médias históricas
+  HOURLY: 3600,      // 1h  — médias históricas
   DAILY: 3600,        // 1h
   HEATMAP: 3600,      // 1h
   EVOLUTION: 120,     // 2min — dados do dia atual mudam com frequência
@@ -29,7 +28,9 @@ const BACKTEST_TABLE = 'theme-park-queue-data.theme_park_queues.backtest_previso
 const SHOWS_TABLE = 'theme-park-queue-data.theme_park_queues.bcw_shows_schedule';
 
 // Endpoint do microsserviço Python de previsão (forecast_service.py)
-const FORECAST_SERVICE_URL = process.env.FORECAST_SERVICE_URL ?? 'http://localhost:8000';
+// Sem a variável, a previsão fica desligada — evita pagar a query de histórico
+// (getDailyAveragesByRide) só pra depois falhar ao chamar um serviço inexistente.
+const FORECAST_SERVICE_URL = process.env.FORECAST_SERVICE_URL;
 
 // Inicializa o cliente BigQuery a partir de variável de ambiente (JSON em base64 ou path)
 function createBigQueryClient(): BigQuery {
@@ -62,6 +63,15 @@ const MAX_VALID_WAIT_TIME = 300;
 // front (theme-park-analytics/src/utils/operatingHours.ts).
 const OPERATING_DAY_START_HOUR = 4;
 
+// A tabela é particionada por DATE(timestamp_utc) (UTC) e clusterizada por
+// park_id. O BigQuery só poda partições com filtro direto em `timestamp_utc` —
+// `DATE(timestamp_utc, '<tz>')` NÃO poda, e sem poda a query lê a tabela
+// inteira (cobrança por bytes lidos). Por isso as queries limitadas no tempo
+// levam um filtro redundante em `timestamp_utc`, com folga pra cobrir o fuso.
+
+/** Janela de busca do status ao vivo — folga pra dias em que o parque não abre. */
+const LIVE_LOOKBACK_DAYS = 7;
+
 /**
  * Helper de SQL: alterna entre buscar o "corpo" de um dia (a partir de
  * `OPERATING_DAY_START_HOUR`) e a "cauda" que viraram a madrugada (antes de
@@ -69,12 +79,17 @@ const OPERATING_DAY_START_HOUR = 4;
  * ordena os dois trechos de forma contínua, cauda por último.
  */
 function operatingDayWhereClause(timezone: string, date: string): string {
+  // [dia-1, dia+2) em UTC cobre o dia operacional local em qualquer fuso.
   return `(
-    (DATE(timestamp_utc, '${timezone}') = '${date}'
-      AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, '${timezone}')) >= ${OPERATING_DAY_START_HOUR})
-    OR
-    (DATE(timestamp_utc, '${timezone}') = DATE_ADD(DATE('${date}'), INTERVAL 1 DAY)
-      AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, '${timezone}')) < ${OPERATING_DAY_START_HOUR})
+    timestamp_utc >= TIMESTAMP_SUB(TIMESTAMP('${date}'), INTERVAL 1 DAY)
+    AND timestamp_utc < TIMESTAMP_ADD(TIMESTAMP('${date}'), INTERVAL 2 DAY)
+    AND (
+      (DATE(timestamp_utc, '${timezone}') = '${date}'
+        AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, '${timezone}')) >= ${OPERATING_DAY_START_HOUR})
+      OR
+      (DATE(timestamp_utc, '${timezone}') = DATE_ADD(DATE('${date}'), INTERVAL 1 DAY)
+        AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, '${timezone}')) < ${OPERATING_DAY_START_HOUR})
+    )
   )`;
 }
 
@@ -90,23 +105,6 @@ const RIDE_NAME_EXPR = `
     ELSE ride_name 
   END
 `;
-
-// ─── PARQUES DISPONÍVEIS ───────────────────────────────────────────────────────
-
-export async function getAvailableParks() {
-  const cacheKey = 'parks:all';
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  const query = `
-    SELECT DISTINCT park_id, park_name 
-    FROM \`${DATASET}\` 
-    ORDER BY park_name
-  `;
-  const [rows] = await bq.query({ query });
-  cache.set(cacheKey, rows, CACHE_TTL.PARKS);
-  return rows;
-}
 
 // ─── MÉDIAS HORÁRIAS ──────────────────────────────────────────────────────────
 
@@ -333,6 +331,7 @@ export async function getRideHeatmapHistory(
       FROM \`${DATASET}\`
       WHERE park_id = @parkId
         AND (${RIDE_NAME_EXPR}) = @rideName
+        AND timestamp_utc >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days + 1 DAY)
         AND DATE(timestamp_utc, @timezone) >= DATE_SUB(CURRENT_DATE(@timezone), INTERVAL @days DAY)
         AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, @timezone)) BETWEEN 8 AND 22
     )
@@ -513,6 +512,7 @@ export async function getLiveFromBigQuery(parkId: number): Promise<any[]> {
       SELECT MAX(timestamp_utc) as max_ts
       FROM \`${DATASET}\`
       WHERE park_id = ${parkId}
+        AND timestamp_utc >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${LIVE_LOOKBACK_DAYS} DAY)
     )
     SELECT 
       ride_id as id,
@@ -523,6 +523,7 @@ export async function getLiveFromBigQuery(parkId: number): Promise<any[]> {
       wait_time
     FROM \`${DATASET}\`, ultimo_registro
     WHERE park_id = ${parkId}
+      AND timestamp_utc >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${LIVE_LOOKBACK_DAYS} DAY)
       AND timestamp_utc = ultimo_registro.max_ts
     ORDER BY name
   `;
@@ -540,50 +541,6 @@ export async function getLiveFromBigQuery(parkId: number): Promise<any[]> {
 
   // Salva no cache de curta duração (2 minutos)
   cache.set(cacheKey, result, CACHE_TTL.EVOLUTION);
-  return result;
-}
-
-// ─── DADOS HISTÓRICOS BRUTOS POR PARQUE ──────────────────────────────────────────
-
-export async function getRawHistoricalData(
-  parkId: number,
-  timezone: string,
-  rideId?: number,
-  year?: number
-): Promise<HistoricalRawData[]> {
-  const cacheKey = `raw:${parkId}:${rideId ?? 'all'}:${year ?? 'all'}`;
-  const cached = cache.get<HistoricalRawData[]>(cacheKey);
-  if (cached) return cached;
-
-  // Construção dinâmica de filtros SQL
-  let filterConditions = '';
-  if (rideId) {
-    filterConditions += ` AND ride_id = ${rideId}`;
-  }
-  if (year) {
-    filterConditions += ` AND EXTRACT(YEAR FROM DATETIME(timestamp_utc, '${timezone}')) = ${year}`;
-  }
-
-  const query = `
-    SELECT 
-      FORMAT_TIMESTAMP('%Y-%m-%dT%H:%M:%E3SZ', timestamp_utc) as timestamp_utc,
-      STRING(DATE(timestamp_utc, '${timezone}')) as data_local,
-      ride_id,
-      ${RIDE_NAME_EXPR} as name,
-      wait_time,
-      IFNULL(is_open, true) as is_open
-    FROM \`${DATASET}\`
-    WHERE park_id = ${parkId}
-      ${filterConditions}
-    ORDER BY timestamp_utc DESC
-    LIMIT 50000
-  `;
-
-  const [rows] = await bq.query({ query });
-  const result = rows as HistoricalRawData[];
-
-  // Mantemos o cache de 5 minutos
-  cache.set(cacheKey, result, 300); 
   return result;
 }
 
@@ -607,6 +564,7 @@ export async function getDailyAveragesByRide(
     FROM \`${DATASET}\`
     WHERE park_id = ${parkId}
       AND wait_time > 0
+      AND timestamp_utc >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${lookbackDays + 1} DAY)
       AND DATE(timestamp_utc, '${timezone}') >= DATE_SUB(CURRENT_DATE('${timezone}'), INTERVAL ${lookbackDays} DAY)
     GROUP BY name, data_local
     HAVING n_leituras >= 20
@@ -634,6 +592,10 @@ export async function getForecast(
   const cacheKey = `forecast:${parkId}:${timezone}:${days}`;
   const cached = cache.get<ForecastResponse>(cacheKey);
   if (cached) return cached;
+
+  if (!FORECAST_SERVICE_URL) {
+    throw new Error('Serviço de previsão não configurado (FORECAST_SERVICE_URL).');
+  }
 
   const historico = await getDailyAveragesByRide(parkId, timezone);
   if (!historico.length) {

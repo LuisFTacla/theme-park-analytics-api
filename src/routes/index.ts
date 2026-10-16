@@ -1,15 +1,13 @@
 // src/routes/index.ts
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { TZ_MAP, DailyAverage } from '../types';
+import { TZ_MAP, PARKS, DailyAverage } from '../types';
 import {
-  getAvailableParks,
   getHourlyAverages,
   getDailyAverages,
   getDailyHeatmapData,
   getDailyEvolution,
   getLiveFromBigQuery,
-  getRawHistoricalData,
   getForecast,
   getForecastCalendarDays,
   getBacktestData,
@@ -37,13 +35,8 @@ function parseParkId(req: Request, res: Response): number | null {
 }
 
 // ─── GET /parks ───────────────────────────────────────────────────────────────
-router.get('/parks', async (_req, res, next) => {
-  try {
-    const parks = await getAvailableParks();
-    ok(res, parks);
-  } catch (err) {
-    next(err);
-  }
+router.get('/parks', (_req, res) => {
+  ok(res, PARKS);
 });
 
 // ─── GET /parks/:parkId/timezone ──────────────────────────────────────────────
@@ -276,45 +269,6 @@ router.get('/parks/:parkId/live', async (req, res, next) => {
   if (id === null) return;
   try {
     const data = await getLiveFromBigQuery(id);
-    ok(res, data);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ─── GET /parks/:parkId/raw ──────────────────────────────────────────────────
-router.get('/parks/:parkId/raw', async (req, res, next) => {
-  const id = parseParkId(req, res);
-  if (id === null) return;
-
-  // Captura os query parameters opcionais
-  const queryRideId = req.query.rideId as string;
-  const queryYear = req.query.year as string;
-
-  let rideId: number | undefined;
-  let year: number | undefined;
-
-  // Validação do rideId caso ele seja enviado
-  if (queryRideId) {
-    rideId = parseInt(queryRideId, 10);
-    if (isNaN(rideId)) {
-      res.status(400).json({ error: 'INVALID_PARAM', message: 'rideId deve ser um número inteiro.' });
-      return;
-    }
-  }
-
-  // Validação do year caso ele seja enviado
-  if (queryYear) {
-    year = parseInt(queryYear, 10);
-    if (isNaN(year) || year < 2000 || year > 2100) {
-      res.status(400).json({ error: 'INVALID_PARAM', message: 'year deve ser um ano válido com 4 dígitos.' });
-      return;
-    }
-  }
-
-  try {
-    const tz = TZ_MAP[id] ?? 'UTC';
-    const data = await getRawHistoricalData(id, tz, rideId, year);
     ok(res, data);
   } catch (err) {
     next(err);
