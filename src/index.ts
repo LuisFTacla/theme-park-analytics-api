@@ -11,12 +11,28 @@ const PORT = process.env.PORT || 3001;
 app.set('trust proxy', 1);
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
-app.use(cors());
+// Só o front-end pode chamar a API pelo navegador — sem isso, qualquer site
+// consegue disparar consultas (pagas) no BigQuery. Aceita várias origens
+// separadas por vírgula. Requisições sem Origin (curl, proxy do Vite em dev)
+// não são afetadas por CORS; essas ficam a cargo do rate limit abaixo.
+const allowedOrigins = (process.env.ALLOWED_ORIGIN ?? '')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+if (!allowedOrigins.length) {
+  console.warn('[CORS] ALLOWED_ORIGIN não definido — API aberta para qualquer origem.');
+}
+
+app.use(cors({ origin: allowedOrigins.length ? allowedOrigins : true }));
 
 // ─── RATE LIMIT ───────────────────────────────────────────────────────────────
+// Uma visita à Home custa ~11 requests e cada parque ~7; 120/min dá folga pra
+// navegação normal e pra várias pessoas atrás do mesmo IP (NAT de 4G, empresa).
+// Repetições caem no cache do servidor e não chegam ao BigQuery.
 app.use(rateLimit({
   windowMs: 60 * 1000, // 1 minuto
-  max: 60,             // 60 requests por IP por minuto
+  max: 120,            // 120 requests por IP por minuto
   standardHeaders: true,
   legacyHeaders: false,
 }));

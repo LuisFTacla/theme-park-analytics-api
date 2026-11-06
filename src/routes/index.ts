@@ -160,8 +160,7 @@ router.get('/parks/:parkId/rides/historical-profile', async (req, res, next) => 
   }
 
   try {
-    const tz = TZ_MAP[id] ?? 'UTC';
-    const data = await getRideHistoricalProfile(id, tz, rideName, interval);
+    const data = await getRideHistoricalProfile(id, rideName, interval);
     ok(res, data);
   } catch (err) {
     next(err);
@@ -214,8 +213,7 @@ router.get('/parks/:parkId/historical-profile', async (req, res, next) => {
   }
 
   try {
-    const tz = TZ_MAP[id] ?? 'UTC';
-    const data = await getParkHistoricalProfile(id, tz, interval);
+    const data = await getParkHistoricalProfile(id, interval);
     ok(res, data);
   } catch (err) {
     next(err);

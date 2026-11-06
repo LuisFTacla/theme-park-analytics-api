@@ -27,6 +27,17 @@ const DATASET = 'theme-park-queue-data.theme_park_queues.historical-data';
 const BACKTEST_TABLE = 'theme-park-queue-data.theme_park_queues.backtest_previsoes';
 const SHOWS_TABLE = 'theme-park-queue-data.theme_park_queues.bcw_shows_schedule';
 
+// Agregados incrementais do histórico (ver sql/ na raiz da API). As consultas
+// que olham "todos os dias" leem daqui em vez da tabela bruta: alguns MB por
+// consulta em vez de 1-2 GB. Já vêm com o filtro de MAX_VALID_WAIT_TIME, a
+// normalização de RIDE_NAME_EXPR e a hora local de cada parque aplicados.
+const AGG_PROFILE_TABLE = 'theme-park-queue-data.theme_park_queues.agg_perfil_bloco';
+const AGG_DAILY_TABLE = 'theme-park-queue-data.theme_park_queues.agg_media_diaria';
+const AGG_CONTROL_TABLE = 'theme-park-queue-data.theme_park_queues.agg_controle';
+
+/** Faixa de horário (local) considerada nos perfis históricos. */
+const PROFILE_HOURS = { from: 8, to: 22 };
+
 // Endpoint do microsserviço Python de previsão (forecast_service.py)
 // Sem a variável, a previsão fica desligada — evita pagar a query de histórico
 // (getDailyAveragesByRide) só pra depois falhar ao chamar um serviço inexistente.
@@ -145,19 +156,37 @@ export async function getDailyAverages(
   const cached = cache.get<{ data: DailyAverage[]; years: number[] }>(cacheKey);
   if (cached) return cached;
 
+  // Os dias já acumulados vêm do agregado; o trecho que ainda não entrou nele
+  // (desde `processado_ate`, menos de um dia normalmente) vem da tabela bruta,
+  // pra o dia de hoje aparecer atualizado. O limite fixo de 7 dias existe só
+  // pra podar partições -- filtro por subquery não poda.
+  //
   // `sessoes` só tem linha pros dias em que a coleta de shows já rodou (a
   // partir de 2026-09-24) -- pra dias mais antigos o LEFT JOIN devolve NULL,
   // e o front simplesmente não mostra a contagem (ver CalendarGrid.tsx).
   const query = `
-    WITH filas AS (
-      SELECT
-        DATE(timestamp_utc, '${timezone}') as data_local,
-        EXTRACT(YEAR FROM DATETIME(timestamp_utc, '${timezone}')) as ano_registro,
-        ROUND(AVG(wait_time), 0) as wait_time
+    WITH somas AS (
+      SELECT data_local, n_positivos, soma_positivos
+      FROM \`${AGG_DAILY_TABLE}\`
+      WHERE park_id = @parkId
+      UNION ALL
+      SELECT DATE(timestamp_utc, @timezone), COUNT(*), SUM(wait_time)
       FROM \`${DATASET}\`
-      WHERE park_id = ${parkId}
+      WHERE park_id = @parkId
+        AND timestamp_utc >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+        AND timestamp_utc >= (SELECT MAX(processado_ate) FROM \`${AGG_CONTROL_TABLE}\`)
         AND wait_time > 0
-      GROUP BY data_local, ano_registro
+        AND wait_time <= @maxValid
+      GROUP BY 1
+    ),
+    filas AS (
+      SELECT
+        data_local,
+        EXTRACT(YEAR FROM data_local) as ano_registro,
+        ROUND(SUM(soma_positivos) / SUM(n_positivos), 0) as wait_time
+      FROM somas
+      GROUP BY data_local
+      HAVING SUM(n_positivos) > 0
     ),
     sessoes AS (
       -- Portal da Escuridão não é um show com sessões, é um labirinto que
@@ -166,7 +195,7 @@ export async function getDailyAverages(
         data_local,
         COUNT(DISTINCT CONCAT(CAST(atracao_id AS STRING), '|', periodo_de, '|', periodo_ate)) as show_sessions
       FROM \`${SHOWS_TABLE}\`
-      WHERE park_id = ${parkId}
+      WHERE park_id = @parkId
         AND nome != 'Portal da Escuridão'
       GROUP BY data_local
     )
@@ -176,7 +205,10 @@ export async function getDailyAverages(
     ORDER BY f.data_local
   `;
 
-  const [rows] = await bq.query({ query });
+  const [rows] = await bq.query({
+    query,
+    params: { parkId, timezone, maxValid: MAX_VALID_WAIT_TIME },
+  });
 
   if (!rows.length) {
     return { data: [], years: [] };
@@ -279,15 +311,29 @@ export async function getRideStats(
   const cached = cache.get<RideStats>(cacheKey);
   if (cached) return cached;
 
+  // Histórico vem do agregado; o dia selecionado, da tabela bruta com poda
+  // de partição ([dia-1, dia+2) em UTC cobre a data local em qualquer fuso).
   const query = `
-    SELECT
-      ROUND(AVG(IF(wait_time > 0 AND wait_time <= @maxValid, wait_time, NULL)), 0) as historical_avg,
-      MAX(IF(wait_time <= @maxValid, wait_time, NULL)) as historical_max,
-      ROUND(AVG(IF(wait_time > 0 AND wait_time <= @maxValid AND DATE(timestamp_utc, @timezone) = @date, wait_time, NULL)), 0) as daily_avg,
-      MAX(IF(wait_time <= @maxValid AND DATE(timestamp_utc, @timezone) = @date, wait_time, NULL)) as daily_max
-    FROM \`${DATASET}\`
-    WHERE park_id = @parkId
-      AND (${RIDE_NAME_EXPR}) = @rideName
+    WITH historico AS (
+      SELECT
+        ROUND(SAFE_DIVIDE(SUM(soma_positivos), SUM(n_positivos)), 0) as historical_avg,
+        MAX(max_valido) as historical_max
+      FROM \`${AGG_PROFILE_TABLE}\`
+      WHERE park_id = @parkId AND ride_name = @rideName
+    ),
+    dia AS (
+      SELECT
+        ROUND(AVG(IF(wait_time > 0, wait_time, NULL)), 0) as daily_avg,
+        MAX(wait_time) as daily_max
+      FROM \`${DATASET}\`
+      WHERE park_id = @parkId
+        AND (${RIDE_NAME_EXPR}) = @rideName
+        AND timestamp_utc >= TIMESTAMP_SUB(TIMESTAMP(@date), INTERVAL 1 DAY)
+        AND timestamp_utc < TIMESTAMP_ADD(TIMESTAMP(@date), INTERVAL 2 DAY)
+        AND DATE(timestamp_utc, @timezone) = @date
+        AND wait_time <= @maxValid
+    )
+    SELECT * FROM historico CROSS JOIN dia
   `;
 
   const [rows] = await bq.query({
@@ -369,7 +415,6 @@ export async function getRideHeatmapHistory(
 
 export async function getRideHistoricalProfile(
   parkId: number,
-  timezone: string,
   rideName: string,
   intervalMinutes: number
 ): Promise<RideHistoricalProfilePoint[]> {
@@ -377,42 +422,46 @@ export async function getRideHistoricalProfile(
   const cached = cache.get<RideHistoricalProfilePoint[]>(cacheKey);
   if (cached) return cached;
 
-  const query = `
-    WITH dados_indexados AS (
-      SELECT
-        wait_time,
-        EXTRACT(HOUR   FROM DATETIME(timestamp_utc, @timezone)) as hora,
-        EXTRACT(MINUTE FROM DATETIME(timestamp_utc, @timezone)) as minuto
-      FROM \`${DATASET}\`
-      WHERE park_id = @parkId
-        AND (${RIDE_NAME_EXPR}) = @rideName
-        AND wait_time > 0
-        AND wait_time <= @maxValid
-        AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, @timezone)) BETWEEN 8 AND 22
-    )
-    SELECT
-      hora,
-      DIV(minuto, @bloco) * @bloco as minuto_bloco,
-      ROUND(AVG(wait_time), 0) as wait_time_medio
-    FROM dados_indexados
-    GROUP BY hora, minuto_bloco
-    ORDER BY hora, minuto_bloco
-  `;
-
-  const [rows] = await bq.query({
-    query,
-    params: { parkId, timezone, rideName, bloco: intervalMinutes, maxValid: MAX_VALID_WAIT_TIME },
-  });
-
-  const result: RideHistoricalProfilePoint[] = (rows as any[]).map(r => ({
-    hora: Number(r.hora),
-    minuto_bloco: Number(r.minuto_bloco),
-    wait_time_medio: Number(r.wait_time_medio),
-    label_tempo: String(r.hora).padStart(2, '0') + ':' + String(r.minuto_bloco).padStart(2, '0'),
-  }));
-
+  const result = await queryHistoricalProfile(
+    'n_positivos', 'soma_positivos',
+    'park_id = @parkId AND ride_name = @rideName',
+    { parkId, rideName, bloco: intervalMinutes },
+  );
   cache.set(cacheKey, result, CACHE_TTL.RIDE_STATS);
   return result;
+}
+
+/**
+ * Média histórica por bloco de `bloco` minutos, a partir dos blocos de 5 min
+ * do agregado. Os intervalos aceitos (5/10/15/30/60) são múltiplos de 5, então
+ * reagrupar somas e contagens dá exatamente a mesma média que a tabela bruta.
+ */
+async function queryHistoricalProfile(
+  countColumn: 'n_validos' | 'n_positivos',
+  sumColumn: 'soma_validos' | 'soma_positivos',
+  where: string,
+  params: Record<string, unknown> & { bloco: number },
+): Promise<RideHistoricalProfilePoint[]> {
+  const query = `
+    SELECT
+      hora,
+      DIV(minuto_bloco, @bloco) * @bloco as bloco,
+      ROUND(SUM(${sumColumn}) / SUM(${countColumn}), 0) as wait_time_medio
+    FROM \`${AGG_PROFILE_TABLE}\`
+    WHERE ${where}
+      AND hora BETWEEN ${PROFILE_HOURS.from} AND ${PROFILE_HOURS.to}
+    GROUP BY hora, bloco
+    HAVING SUM(${countColumn}) > 0
+    ORDER BY hora, bloco
+  `;
+
+  const [rows] = await bq.query({ query, params });
+  return (rows as any[]).map(r => ({
+    hora: Number(r.hora),
+    minuto_bloco: Number(r.bloco),
+    wait_time_medio: Number(r.wait_time_medio),
+    label_tempo: String(r.hora).padStart(2, '0') + ':' + String(r.bloco).padStart(2, '0'),
+  }));
 }
 
 // ─── EVOLUÇÃO DIÁRIA (GRÁFICO DE LINHA) ───────────────────────────────────────
@@ -455,45 +504,17 @@ export async function getDailyEvolution(
 // mas por bloco de tempo e com todos os dias agregados.
 export async function getParkHistoricalProfile(
   parkId: number,
-  timezone: string,
   intervalMinutes: number
 ): Promise<RideHistoricalProfilePoint[]> {
   const cacheKey = `park_historical_profile:${parkId}:${intervalMinutes}`;
   const cached = cache.get<RideHistoricalProfilePoint[]>(cacheKey);
   if (cached) return cached;
 
-  const query = `
-    WITH dados_indexados AS (
-      SELECT
-        wait_time,
-        EXTRACT(HOUR   FROM DATETIME(timestamp_utc, @timezone)) as hora,
-        EXTRACT(MINUTE FROM DATETIME(timestamp_utc, @timezone)) as minuto
-      FROM \`${DATASET}\`
-      WHERE park_id = @parkId
-        AND wait_time <= @maxValid
-        AND EXTRACT(HOUR FROM DATETIME(timestamp_utc, @timezone)) BETWEEN 8 AND 22
-    )
-    SELECT
-      hora,
-      DIV(minuto, @bloco) * @bloco as minuto_bloco,
-      ROUND(AVG(wait_time), 0) as wait_time_medio
-    FROM dados_indexados
-    GROUP BY hora, minuto_bloco
-    ORDER BY hora, minuto_bloco
-  `;
-
-  const [rows] = await bq.query({
-    query,
-    params: { parkId, timezone, bloco: intervalMinutes, maxValid: MAX_VALID_WAIT_TIME },
-  });
-
-  const result: RideHistoricalProfilePoint[] = (rows as any[]).map(r => ({
-    hora: Number(r.hora),
-    minuto_bloco: Number(r.minuto_bloco),
-    wait_time_medio: Number(r.wait_time_medio),
-    label_tempo: String(r.hora).padStart(2, '0') + ':' + String(r.minuto_bloco).padStart(2, '0'),
-  }));
-
+  const result = await queryHistoricalProfile(
+    'n_validos', 'soma_validos',
+    'park_id = @parkId',
+    { parkId, bloco: intervalMinutes },
+  );
   cache.set(cacheKey, result, CACHE_TTL.RIDE_STATS);
   return result;
 }
