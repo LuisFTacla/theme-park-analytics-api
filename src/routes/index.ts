@@ -17,12 +17,16 @@ import {
   getParkHistoricalProfile,
   getShowsSchedule,
 } from '../services/bigquery.service';
+import { cacheControlFor } from '../cachePolicy';
 
 const router = Router();
 
-// Helper para respostas de sucesso
+// Helper para respostas de sucesso. Só elas levam Cache-Control: erros e 429
+// nunca ficam guardados no CDN.
 const ok = <T>(res: Response, data: T) =>
-  res.json({ data, timestamp: new Date().toISOString() });
+  res
+    .set('Cache-Control', cacheControlFor(res.req))
+    .json({ data, timestamp: new Date().toISOString() });
 
 // Helper para extrair e validar o parkId
 function parseParkId(req: Request, res: Response): number | null {
