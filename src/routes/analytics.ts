@@ -1,17 +1,26 @@
 import { Router } from 'express';
 import geoip from 'geoip-lite';
-import { bq } from '../services/bigquery.service'; // Ajuste o nome da variável se lá for diferente (ex: bigquery)
+import { bq } from '../services/bigquery.service';
 
 const router = Router();
-const DATASET_NAME = 'theme_park_queues'; // Dataset que acabamos de criar
+const DATASET_NAME = 'theme_park_queues';
 
 router.post('/track', async (req, res) => {
   try {
     const { eventType, parkId, parkName, tabName, sessionId } = req.body;
     
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    const cleanIp = Array.isArray(ip) ? ip[0] : ip?.split(',')[0].trim();
+    // Captura o IP real considerando o trust proxy do Render
+    const ipHeader = req.headers['x-forwarded-for'];
+    const cleanIp = Array.isArray(ipHeader) 
+      ? ipHeader[0] 
+      : (ipHeader ? ipHeader.split(',')[0].trim() : req.socket.remoteAddress);
+
     const geo = cleanIp ? geoip.lookup(cleanIp) : null;
+
+    // Se o geoip encontrar a cidade, usa ela. Se não, tenta usar a região (estado/UF, ex: SP, PR). 
+    // Se nenhum dos dois existir, retorna 'Unknown'.
+    const city = geo?.city || geo?.region || 'Unknown';
+    const country = geo?.country || 'Unknown';
 
     const row = {
       timestamp: new Date().toISOString(),
@@ -19,12 +28,12 @@ router.post('/track', async (req, res) => {
       park_id: parkId || null,
       park_name: parkName || null,
       tab_name: tabName || null,
-      country: geo?.country || 'Unknown',
-      city: geo?.city || 'Unknown',
+      country,
+      city,
       session_id: sessionId || 'anonymous',
     };
 
-    // Insere no BigQuery (agora descomentado e funcional)
+    // Insere no BigQuery
     await bq.dataset(DATASET_NAME).table('user_events').insert([row]);
 
     return res.status(204).send();
