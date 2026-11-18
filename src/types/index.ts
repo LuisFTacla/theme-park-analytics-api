@@ -180,3 +180,26 @@ export const BCW_MECHANICAL_IDS = [
   13872, 11368, 11367, 11444, 11358, 12325, 12326, 11327,
   11335, 11336, 11338, 11344, 11459, 11334, 15407, 11331,
 ];
+
+// Atrações elegíveis do Magic Kingdom (park_id 6)
+export const MAGIC_KINGDOM_MECHANICAL_IDS = [
+  137, 141, 133, 132, 135,
+  136, 161, 129, 126, 142,
+  127, 1181, 130, 13630, 1179,
+  140, 1189, 248, 131,
+  138, 143, 1190, 11527, 17950,
+];
+
+// Atrações elegíveis do EPCOT (park_id 5)
+export const EPCOT_MECHANICAL_IDS = [
+  155, 159, 10093, 158, 160, 156, 16467, 153, 152, 829, 2679, 466, 8956
+];
+
+// Atrações elegíveis do EPCOT (park_id 5)
+export const HOLLYWOOD_STUDIOS_MECHANICAL_IDS = [
+  120, 7333, 6361, 117, 6368, 6369, 16343, 123, 5477, 5476
+]
+
+export const ANIMAL_KINGDOM_MECHANICAL_IDS = [
+  651, 113, 655, 110, 112, 14943, 4439, 4438 
+];

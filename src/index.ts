@@ -3,6 +3,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import routes from './routes';
+import analyticsRouter from './routes/analytics';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -43,6 +44,9 @@ app.use(express.json());
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// ─── ANALYTICS ────────────────────────────────────────────────────────────────
+app.use('/api/analytics', analyticsRouter);
 
 // ─── ROTAS DA API ─────────────────────────────────────────────────────────────
 app.use('/api', routes);

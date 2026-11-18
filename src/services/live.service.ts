@@ -2,7 +2,14 @@
 
 import axios from 'axios';
 import NodeCache from 'node-cache';
-import { LiveRide, BCW_MECHANICAL_IDS } from '../types';
+import {
+  LiveRide,
+  BCW_MECHANICAL_IDS,
+  MAGIC_KINGDOM_MECHANICAL_IDS,
+  EPCOT_MECHANICAL_IDS,
+  HOLLYWOOD_STUDIOS_MECHANICAL_IDS,
+  ANIMAL_KINGDOM_MECHANICAL_IDS,
+} from '../types';
 
 const cache = new NodeCache({ stdTTL: 60 }); // 60s de cache para dados ao vivo
 
@@ -28,10 +35,30 @@ export async function getLiveData(parkId: number): Promise<LiveRide[]> {
   }
 
   // Filtra apenas atrações mecânicas para o BCW
-  const filtered =
-    parkId === 319
-      ? allRides.filter(r => BCW_MECHANICAL_IDS.includes(r.id))
-      : allRides;
+  // Filtra atrações elegíveis conforme o parque
+  const filtered = allRides.filter(ride => {
+    if (parkId === 319) {
+      return BCW_MECHANICAL_IDS.includes(ride.id);
+    }
+
+    if (parkId === 6) {
+      return MAGIC_KINGDOM_MECHANICAL_IDS.includes(ride.id);
+    }
+
+    if (parkId === 6) {
+      return EPCOT_MECHANICAL_IDS.includes(ride.id);
+    }
+
+    if (parkId === 7) {
+      return HOLLYWOOD_STUDIOS_MECHANICAL_IDS.includes(ride.id);
+    }
+
+    if (parkId === 8) {
+      return ANIMAL_KINGDOM_MECHANICAL_IDS.includes(ride.id);
+    }
+
+    return true;
+  });
 
   // Normaliza: Title Case nos nomes
   const normalized = filtered.map(r => ({

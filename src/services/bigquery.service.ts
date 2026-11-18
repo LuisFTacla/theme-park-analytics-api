@@ -6,6 +6,9 @@ import {
   HourlyAverage, DailyAverage, HeatmapDataPoint, DailyEvolutionPoint,
   DailyRideAverage, ForecastResponse, BacktestPoint,
   RideStats, RideHeatmapHistoryPoint, RideHistoricalProfilePoint, ShowSession,
+  MAGIC_KINGDOM_MECHANICAL_IDS, EPCOT_MECHANICAL_IDS,
+  HOLLYWOOD_STUDIOS_MECHANICAL_IDS,
+  ANIMAL_KINGDOM_MECHANICAL_IDS
 } from '../types';
 
 // Cache em memória: TTL em segundos
@@ -59,7 +62,7 @@ function createBigQueryClient(): BigQuery {
   return new BigQuery();
 }
 
-const bq = createBigQueryClient();
+export const bq = createBigQueryClient();
 
 // Teto de tempo de espera considerado válido — mesmo valor já usado no resto
 // do pipeline pra descartar erros de digitação de operadores (ex: 990 min).
@@ -220,7 +223,7 @@ export async function getDailyAverages(
     const dateStr: string = typeof row.data_local === 'object'
       ? row.data_local.value
       : String(row.data_local);
-    
+
     // Forçamos o append de "T00:00:00Z" para garantir o parse isolado em UTC puro
     const date = new Date(`${dateStr}T00:00:00Z`);
 
@@ -233,9 +236,9 @@ export async function getDailyAverages(
       ano_registro: Number(row.ano_registro),
       wait_time: Number(row.wait_time),
       // 🌟 LER SEMPRE OS MÉTODOS UTC PARA NÃO DEPENDER DO FUSO DO SERVIDOR
-      year:  date.getUTCFullYear(),
+      year: date.getUTCFullYear(),
       month: date.getUTCMonth() + 1,
-      day:   date.getUTCDate(),
+      day: date.getUTCDate(),
       day_of_week: DAY_NAMES[date.getUTCDay()],
       week_of_year: weekOfYear,
       show_sessions: row.show_sessions != null ? Number(row.show_sessions) : undefined,
@@ -261,6 +264,20 @@ export async function getDailyHeatmapData(
   if (cached) return cached;
 
   const bloco = intervalMinutes;
+
+  // Filtra atrações elegíveis no Heatmap do Magic Kingdom
+  const MECHANICAL_IDS_BY_PARK: Record<number, number[]> = {
+    6: MAGIC_KINGDOM_MECHANICAL_IDS,
+    5: EPCOT_MECHANICAL_IDS,
+    7: HOLLYWOOD_STUDIOS_MECHANICAL_IDS,
+    8: ANIMAL_KINGDOM_MECHANICAL_IDS,
+  };
+
+  const parkIds = MECHANICAL_IDS_BY_PARK[parkId];
+  const rideFilter = parkIds && parkIds.length > 0
+    ? `AND ride_id IN (${parkIds.join(',')})`
+    : '';
+
   const query = `
     WITH dados_indexados AS (
       SELECT
@@ -270,6 +287,7 @@ export async function getDailyHeatmapData(
         EXTRACT(MINUTE FROM DATETIME(timestamp_utc, '${timezone}')) as minuto
       FROM \`${DATASET}\`
       WHERE park_id = ${parkId}
+        ${rideFilter}
         AND ${operatingDayWhereClause(timezone, date)}
     )
     SELECT
@@ -550,16 +568,32 @@ export async function getLiveFromBigQuery(parkId: number): Promise<any[]> {
   `;
 
   const [rows] = await bq.query({ query });
-  
+
   // Como os dados já vêm tratados e filtrados pelo seu Job de coleta no BigQuery,
   // basta tipar e estruturar o retorno esperado pela rota.
-  const result = rows.map(r => ({
-    id: Number(r.id),
-    name: String(r.name),
-    is_open: Boolean(r.is_open),
-    wait_time: Number(r.wait_time)
-  }));
+  const result = rows
+    .map(r => ({
+      id: Number(r.id),
+      name: String(r.name),
+      is_open: Boolean(r.is_open),
+      wait_time: Number(r.wait_time)
+    }))
+    .filter(ride => {
+      if (parkId === 6) {
+        return MAGIC_KINGDOM_MECHANICAL_IDS.includes(ride.id);
+      }
+      if (parkId === 5) {
+        return EPCOT_MECHANICAL_IDS.includes(ride.id);
+      }
+      if (parkId === 7) {
+        return HOLLYWOOD_STUDIOS_MECHANICAL_IDS.includes(ride.id);
+      }
+      if (parkId === 8) {
+        return ANIMAL_KINGDOM_MECHANICAL_IDS.includes(ride.id);
+      }
 
+      return true;
+    });
   // Salva no cache de curta duração (2 minutos)
   cache.set(cacheKey, result, CACHE_TTL.EVOLUTION);
   return result;
