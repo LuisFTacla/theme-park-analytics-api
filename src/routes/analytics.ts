@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import geoip from 'geoip-lite';
 import { bq } from '../services/bigquery.service';
 
 const router = Router();
@@ -9,19 +8,29 @@ router.post('/track', async (req, res) => {
   try {
     const { eventType, parkId, parkName, tabName, sessionId } = req.body;
     
-    // Captura o IP considerando o trust proxy do Render
+    // Captura o IP real considerando o trust proxy do Render
     const ipHeader = req.headers['x-forwarded-for'];
     const cleanIp = Array.isArray(ipHeader) 
       ? ipHeader[0] 
       : (ipHeader ? ipHeader.split(',')[0].trim() : req.socket.remoteAddress);
 
-    const geo = cleanIp ? geoip.lookup(cleanIp) : null;
+    let country = 'Unknown';
+    let city = 'Unknown';
 
-    // 🔍 LOG DE DEPURAÇÃO PARA VER NO PAINEL DO RENDER:
-    console.log(`[Analytics Debug] IP recebido: ${cleanIp} | Geo encontrado:`, geo);
-
-    const city = geo?.city || geo?.region || 'Unknown';
-    const country = geo?.country || 'Unknown';
+    // Se não for IP local, consulta uma API de geolocalização em tempo real
+    if (cleanIp && cleanIp !== '127.0.0.1' && cleanIp !== '::1') {
+      try {
+        const response = await fetch(`http://ip-api.com/json/${cleanIp}?fields=status,country,city,regionName`);
+        const geoData = await response.json() as any; // <--- Adicione o "as any" aqui
+        
+        if (geoData.status === 'success') {
+          country = geoData.country || 'Unknown';
+          city = geoData.city || geoData.regionName || 'Unknown';
+        }
+      } catch (apiError) {
+        console.warn('Erro ao consultar API de geolocalização:', apiError);
+      }
+    }
 
     const row = {
       timestamp: new Date().toISOString(),
@@ -34,7 +43,6 @@ router.post('/track', async (req, res) => {
       session_id: sessionId || 'anonymous',
     };
 
-    // Insere no BigQuery
     await bq.dataset(DATASET_NAME).table('user_events').insert([row]);
 
     return res.status(204).send();
