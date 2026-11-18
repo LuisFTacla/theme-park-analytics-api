@@ -9,7 +9,7 @@ router.post('/track', async (req, res) => {
   try {
     const { eventType, parkId, parkName, tabName, sessionId } = req.body;
     
-    // Captura o IP real considerando o trust proxy do Render
+    // Captura o IP considerando o trust proxy do Render
     const ipHeader = req.headers['x-forwarded-for'];
     const cleanIp = Array.isArray(ipHeader) 
       ? ipHeader[0] 
@@ -17,8 +17,9 @@ router.post('/track', async (req, res) => {
 
     const geo = cleanIp ? geoip.lookup(cleanIp) : null;
 
-    // Se o geoip encontrar a cidade, usa ela. Se não, tenta usar a região (estado/UF, ex: SP, PR). 
-    // Se nenhum dos dois existir, retorna 'Unknown'.
+    // 🔍 LOG DE DEPURAÇÃO PARA VER NO PAINEL DO RENDER:
+    console.log(`[Analytics Debug] IP recebido: ${cleanIp} | Geo encontrado:`, geo);
+
     const city = geo?.city || geo?.region || 'Unknown';
     const country = geo?.country || 'Unknown';
 
